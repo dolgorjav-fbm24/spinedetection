@@ -12,8 +12,7 @@ def load_image(path):
             ds = dicom.dcmread(path)
             img = ds.pixel_array
             # Normalize to 8-bit
-            img = cv2.normalize(img, None, 0, 255, cv2.NORM_MINMAX)
-            img = np.uint8(img)
+             
         else:
             # Энгийн зураг (PNG, JPG)
             img = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
@@ -247,3 +246,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+    # зөвхөн жишээ файл тул мөр бүрийг судлах.
+
+    
