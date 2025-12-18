@@ -15,6 +15,7 @@ contours, hierarchy=cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX
 #"одоо зургаа хадгалах "
 def save_image(image, output_path):
         # ur dung haruula
+    cv2.imwrite(output_path, binary)
     plt.imshow(image, cmap='gray')
     plt.title('Processed DICOM Image')
     plt.axis('off')
