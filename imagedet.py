@@ -1,292 +1,231 @@
 import cv2
 import numpy as np
+import pydicom
 from matplotlib import pyplot as plt
+import os
 
-def create_lumbar_spine_xray():
-    """L1-L2 нугалмын симуляци зураг үүсгэх"""
-    img = np.zeros((600, 400), dtype=np.uint8)
-    
-    bone_color = 200
-    
-    # L1 нугалам (дээд)
-    # Их бие (vertebral body)
-    cv2.rectangle(img, (150, 150), (250, 210), bone_color, -1)
-    # Spinous process (арын сунасан хэсэг)
-    pts_l1_spine = np.array([[200, 150], [180, 120], [220, 120]], np.int32)
-    cv2.fillPoly(img, [pts_l1_spine], bone_color)
-    # Transverse process (хажуугийн сунасан хэсэг)
-    cv2.ellipse(img, (140, 175), (15, 25), 0, 0, 360, bone_color, -1)
-    cv2.ellipse(img, (260, 175), (15, 25), 0, 0, 360, bone_color, -1)
-    
-    # Диск (L1-L2 хоорондын)
-    cv2.rectangle(img, (160, 210), (240, 230), bone_color-60, -1)
-    
-    # L2 нугалам (доод)
-    # Их бие
-    cv2.rectangle(img, (150, 230), (250, 290), bone_color, -1)
-    # Spinous process
-    pts_l2_spine = np.array([[200, 290], [180, 320], [220, 320]], np.int32)
-    cv2.fillPoly(img, [pts_l2_spine], bone_color)
-    # Transverse process
-    cv2.ellipse(img, (140, 255), (15, 25), 0, 0, 360, bone_color, -1)
-    cv2.ellipse(img, (260, 255), (15, 25), 0, 0, 360, bone_color, -1)
-    
-    # *** ХУГАРАЛ НЭМЭХ - L2 их биеийн дээд хэсэгт ***
-    # Compression fracture (шахагдсан хугарал)
-    # L2-ийн дээд талд зигзаг хугарал
-    fracture_line = [
-        (155, 235), (170, 238), (165, 242), (180, 245),
-        (175, 248), (190, 250), (185, 253), (200, 255),
-        (195, 258), (210, 260), (205, 263), (220, 265),
-        (215, 268), (230, 270), (235, 273), (245, 275)
-    ]
-    
-    for i in range(len(fracture_line) - 1):
-        cv2.line(img, fracture_line[i], fracture_line[i+1], 20, 4)
-    
-    # Хугарлын эргэн тойронд бага зэрэг деформаци
-    cv2.ellipse(img, (200, 250), (40, 15), 0, 0, 360, bone_color-80, -1)
-    
-    # Хугарлаас болж дээд хэсэг бага зэрэг шахагдсан
-    cv2.line(img, (155, 235), (245, 235), bone_color-100, 3)
-    
-    # Дуу чимээ нэмэх (бодит рентген шиг)
-    noise = np.random.normal(0, 10, img.shape).astype(np.int16)
-    img = np.clip(img.astype(np.int16) + noise, 0, 255).astype(np.uint8)
-    
-    # Gradient (дэвсгэр тэгш бус гэрэлтэлт)
-    for i in range(img.shape[0]):
-        factor = 0.6 + 0.4 * np.sin(i / 100)
-        img[i, :] = np.clip(img[i, :] * factor, 0, 255).astype(np.uint8)
-    
-    # Хөндлөн гэрлийн шугам (рентген эффект)
-    cv2.line(img, (0, 300), (400, 320), 255, 2, cv2.LINE_AA)
-    
-    # Тэмдэглэгээ нэмэх
-    cv2.putText(img, 'L1', (270, 180), cv2.FONT_HERSHEY_SIMPLEX, 
-                0.7, 255, 2, cv2.LINE_AA)
-    cv2.putText(img, 'L2', (270, 260), cv2.FONT_HERSHEY_SIMPLEX, 
-                0.7, 255, 2, cv2.LINE_AA)
-    
-    return img
+def load_dicom_image(dicom_path):
+    """DICOM файл уншиж numpy array болгох"""
+    try:
+        dicom = pydicom.dcmread(dicom_path)
+        img_array = dicom.pixel_array
+        
+        # Normalize (0-255)
+        img_array = img_array.astype(float)
+        img_normalized = ((img_array - img_array.min()) / 
+                         (img_array.max() - img_array.min()) * 255)
+        img_normalized = img_normalized.astype(np.uint8)
+        
+        print(f"✓ Зураг уншсан: {img_normalized.shape}")
+        return img_normalized
+    except Exception as e:
+        print(f"❌ Алдаа: {e}")
+        return None
 
-def detect_vertebral_fracture(img):
-    """Нугалмын хугарал илрүүлэх"""
+def enhance_vertebrae(img):
+    """Нугалмыг тодруулах (зөвхөн CLAHE)"""
+    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8,8))
+    enhanced = clahe.apply(img)
+    return enhanced
+
+def detect_vertebrae_regions(img):
+    """Нугалмын бүс олох - илүү зөөлөн арга"""
+    # 1. Median blur - дуу чимээ арилгах
+    blurred = cv2.medianBlur(img, 5)
     
-    # Preprocessing
-    blurred = cv2.GaussianBlur(img, (5, 5), 0)
+    # 2. Adaptive threshold - орон нутгийн босго
+    binary = cv2.adaptiveThreshold(blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
+                                   cv2.THRESH_BINARY, 21, 5)
     
-    # CLAHE - contrast сайжруулалт
-    clahe = cv2.createCLAHE(clipLimit=4.0, tileGridSize=(8, 8))
-    enhanced = clahe.apply(blurred)
+    # 3. Том morphological operations - жижиг дуу чимээ устгах
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (10, 10))
+    binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel, iterations=3)
+    binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel, iterations=2)
     
-    # Threshold
-    _, thresh = cv2.threshold(enhanced, 0, 255, 
-                              cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    # 4. Контурууд олох
+    contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     
-    # Инверс хийх (хугарал харанхуй учраас)
-    thresh_inv = cv2.bitwise_not(thresh)
+    return contours, binary
+
+def filter_and_identify_vertebrae(contours, img_shape):
+    """L1-L5 нугалмыг шүүж таних"""
+    height, width = img_shape
+    candidates = []
     
-    # Morphological operations
-    kernel = np.ones((3, 3), np.uint8)
-    morph = cv2.morphologyEx(thresh_inv, cv2.MORPH_CLOSE, kernel, iterations=2)
-    morph = cv2.morphologyEx(morph, cv2.MORPH_OPEN, kernel, iterations=1)
+    print(f"\n   Зургийн хэмжээ: {width}x{height}, Нийт талбай: {width*height}")
     
-    # Canny edge detection
-    edges = cv2.Canny(enhanced, 20, 80)
-    
-    # Contour илрүүлэх
-    contours, hierarchy = cv2.findContours(edges, cv2.RETR_TREE, 
-                                          cv2.CHAIN_APPROX_SIMPLE)
-    
-    # Үр дүн зураг
-    result = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
-    
-    # Хугарал илрүүлэх - L1-L2 бүсэд анхаарах
-    fractures = []
-    
-    # L1-L2 бүс (y = 150-300 орчим)
-    roi_y_min, roi_y_max = 150, 300
-    
-    for contour in contours:
+    for i, contour in enumerate(contours):
         area = cv2.contourArea(contour)
-        
-        if area < 30 or area > 3000:
-            continue
-        
-        perimeter = cv2.arcLength(contour, True)
-        if perimeter == 0:
-            continue
-        
-        # Bounding box
         x, y, w, h = cv2.boundingRect(contour)
         
-        # L1-L2 бүс дотор байгаа эсэхийг шалгах
-        if not (roi_y_min < y < roi_y_max):
-            continue
+        # Хэмжээний шалгуур - илүү том объект хайх
+        min_area = (height * width) * 0.01   # 1% - илүү том
+        max_area = (height * width) * 0.25   # 25%
         
-        # Circularity (дугуй байдал)
-        circularity = 4 * np.pi * area / (perimeter * perimeter)
-        
-        # Aspect ratio
+        # Aspect ratio - нугалам нь ойролцоогоор дөрвөлжин
         aspect_ratio = float(w) / h if h > 0 else 0
         
-        # Хугарал шалгуур:
-        # 1. Сунасан хэлбэртэй (circularity < 0.3)
-        # 2. Хэвтээ чиглэлтэй (aspect_ratio > 2)
-        # 3. Тодорхой хэмжээтэй
+        # Дунд хэсэгт байгаа эсэх
+        center_x = x + w // 2
+        is_centered = 0.15 * width < center_x < 0.85 * width
         
-        if circularity < 0.35 and aspect_ratio > 1.5 and area > 50:
-            fractures.append({
+        # Debug: эхний 15 контурын мэдээлэл
+        if i < 15:
+            print(f"   Контур {i+1}: area={area:.0f} ({'✓' if min_area < area < max_area else '✗'}), "
+                  f"size={w}×{h}, ratio={aspect_ratio:.2f} ({'✓' if 0.3 < aspect_ratio < 3.0 else '✗'}), "
+                  f"centered={'✓' if is_centered else '✗'}")
+        
+        if (min_area < area < max_area and 
+            0.3 < aspect_ratio < 3.0 and
+            w > 30 and h > 30 and
+            is_centered):
+            
+            candidates.append({
                 'contour': contour,
+                'bbox': (x, y, w, h),
                 'area': area,
-                'circularity': circularity,
-                'position': (x, y),
-                'aspect_ratio': aspect_ratio
+                'center_y': y + h//2,
+                'center_x': x + w//2
             })
-            
-            # Хугарлыг тэмдэглэх
-            cv2.drawContours(result, [contour], -1, (0, 0, 255), 3)
-            cv2.rectangle(result, (x, y), (x+w, y+h), (0, 255, 0), 2)
-            
-            # "FRACTURE" гэж бичих
-            cv2.putText(result, 'FRACTURE!', (x, y-10), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
     
-    # ROI хүрээг харуулах
-    cv2.rectangle(result, (0, roi_y_min), (img.shape[1], roi_y_max), 
-                 (255, 255, 0), 2)
-    cv2.putText(result, 'L1-L2 Region', (10, roi_y_min-10), 
-               cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
+    print(f"\n   → {len(candidates)} candidates шүүгдсэн")
     
-    return result, thresh, edges, morph, fractures
+    # Y координатаар эрэмбэлэх (дээрээс доош)
+    candidates = sorted(candidates, key=lambda x: x['center_y'])
+    
+    # Хамгийн том 5-10 контур авах, дараа нь Y-ээр эрэмбэлэх
+    if len(candidates) > 5:
+        # Area-гаар эрэмбэлж том 8-ыг авах
+        candidates_by_size = sorted(candidates, key=lambda x: x['area'], reverse=True)[:8]
+        # Дахиад Y-ээр эрэмбэлэх
+        candidates_by_size = sorted(candidates_by_size, key=lambda x: x['center_y'])
+        vertebrae = candidates_by_size[:5]
+    else:
+        vertebrae = candidates[:5]
+    
+    # L1-L5 label
+    labels = ['L1', 'L2', 'L3', 'L4', 'L5']
+    for i, vert in enumerate(vertebrae):
+        vert['label'] = labels[i] if i < 5 else f'V{i+1}'
+    
+    return vertebrae
 
-def main():
-    print("="*60)
-    print("  L1-L2 НУГАЛМЫН ХУГАРАЛ ИЛРҮҮЛЭХ СИСТЕМ")
-    print("="*60)
+def draw_vertebrae_boxes(img, vertebrae):
+    """Анхны зураг дээр дөрвөлжин зурах"""
+    # RGB болгох
+    img_color = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
     
-    print("\n[1/3] Нурууны нугалам симуляци үүсгэж байна...")
-    xray = create_lumbar_spine_xray()
+    # Өнгөний палитр
+    colors = [
+        (0, 255, 255),    # Шар - L1
+        (0, 255, 0),      # Ногоон - L2
+        (255, 0, 0),      # Цэнхэр - L3
+        (0, 165, 255),    # Улбар шар - L4
+        (255, 0, 255)     # Ягаан - L5
+    ]
     
-    print("[2/3] Хугарал илрүүлж байна...")
-    result, thresh, edges, morph, fractures = detect_vertebral_fracture(xray)
+    for i, vert in enumerate(vertebrae):
+        x, y, w, h = vert['bbox']
+        color = colors[i % len(colors)]
+        label = vert['label']
+        
+        # Том дөрвөлжин (зузаан 4)
+        cv2.rectangle(img_color, (x, y), (x+w, y+h), color, 4)
+        
+        # Label бичих
+        font_scale = 1.2
+        thickness = 3
+        
+        # Background box
+        text_size = cv2.getTextSize(label, cv2.FONT_HERSHEY_BOLD, font_scale, thickness)[0]
+        cv2.rectangle(img_color, 
+                     (x-2, y-text_size[1]-15), 
+                     (x+text_size[0]+8, y-2), 
+                     color, -1)
+        
+        # Text (цагаан өнгөөр)
+        cv2.putText(img_color, label, (x+3, y-8), 
+                   cv2.FONT_HERSHEY_BOLD, font_scale, (255, 255, 255), thickness)
+        
+        # Төв цэг
+        center = (vert['center_x'], vert['center_y'])
+        cv2.circle(img_color, center, 6, color, -1)
+        cv2.circle(img_color, center, 6, (255, 255, 255), 2)
     
-    print("[3/3] Үр дүн боловсруулж байна...")
+    return img_color
+
+def create_result_display(original, result_img, vertebrae):
+    """Үр дүн харуулах - анхны болон тэмдэглэсэн зургийг зэрэгцүүлэх"""
+    fig, axes = plt.subplots(1, 2, figsize=(16, 10))
     
-    # Visualization
-    plt.figure(figsize=(18, 12))
+    # 1. Анхны зураг
+    axes[0].imshow(original, cmap='gray')
+    axes[0].set_title('Анхны DICOM зураг', fontsize=16, fontweight='bold', pad=20)
+    axes[0].axis('off')
     
-    # Эх зураг
-    plt.subplot(2, 4, 1)
-    plt.imshow(xray, cmap='gray')
-    plt.title('Эх зураг\n(L1-L2 нугалам)', fontsize=12, weight='bold')
-    plt.axis('off')
-    
-    # Enhanced
-    plt.subplot(2, 4, 2)
-    clahe = cv2.createCLAHE(clipLimit=4.0, tileGridSize=(8, 8))
-    enhanced = clahe.apply(cv2.GaussianBlur(xray, (5, 5), 0))
-    plt.imshow(enhanced, cmap='gray')
-    plt.title('CLAHE Enhanced', fontsize=11)
-    plt.axis('off')
-    
-    # Threshold
-    plt.subplot(2, 4, 3)
-    plt.imshow(thresh, cmap='gray')
-    plt.title('Threshold', fontsize=11)
-    plt.axis('off')
-    
-    # Morphological
-    plt.subplot(2, 4, 4)
-    plt.imshow(morph, cmap='gray')
-    plt.title('Morphological', fontsize=11)
-    plt.axis('off')
-    
-    # Edges
-    plt.subplot(2, 4, 5)
-    plt.imshow(edges, cmap='gray')
-    plt.title('Canny Edges', fontsize=11)
-    plt.axis('off')
-    
-    # Илрүүлсэн үр дүн
-    plt.subplot(2, 4, 6)
-    plt.imshow(cv2.cvtColor(result, cv2.COLOR_BGR2RGB))
-    title_color = 'red' if len(fractures) > 0 else 'green'
-    plt.title(f'ИЛРҮҮЛЭЛТ\n({len(fractures)} хугарал)', 
-             fontsize=13, color=title_color, weight='bold')
-    plt.axis('off')
-    
-    # Томруулсан харагдац
-    plt.subplot(2, 4, 7)
-    if len(fractures) > 0:
-        x, y = fractures[0]['position']
-        margin = 50
-        y1 = max(0, y - margin)
-        y2 = min(result.shape[0], y + margin + 50)
-        x1 = max(0, x - margin)
-        x2 = min(result.shape[1], x + margin + 100)
-        zoomed = result[y1:y2, x1:x2]
-        plt.imshow(cv2.cvtColor(zoomed, cv2.COLOR_BGR2RGB))
-        plt.title('Хугарлын томруулсан', fontsize=11, color='red')
-    else:
-        plt.imshow(cv2.cvtColor(result, cv2.COLOR_BGR2RGB))
-        plt.title('Хугарал олдсонгүй', fontsize=11, color='green')
-    plt.axis('off')
-    
-    # Статистик мэдээлэл
-    plt.subplot(2, 4, 8)
-    plt.axis('off')
-    
-    stats = "╔═══════════════════════════╗\n"
-    stats += "║   ШИНЖИЛГЭЭНИЙ ҮР ДҮН    ║\n"
-    stats += "╚═══════════════════════════╝\n\n"
-    stats += f"Илэрсэн хугарал: {len(fractures)}\n"
-    stats += f"Шалгасан бүс: L1-L2\n\n"
-    
-    if fractures:
-        stats += "⚠️  АНХААРУУЛГА!\n"
-        stats += "Хугарал илэрлээ!\n\n"
-        stats += "Дэлгэрэнгүй:\n"
-        for i, f in enumerate(fractures[:2], 1):
-            stats += f"\nХугарал #{i}:\n"
-            stats += f"  Талбай: {f['area']:.0f} px²\n"
-            stats += f"  Дугуй: {f['circularity']:.3f}\n"
-            stats += f"  Харьцаа: {f['aspect_ratio']:.2f}\n"
-        stats += "\n→ Эмчид шалгуулна уу!"
-    else:
-        stats += "✓ Хугарал илрээгүй\n"
-        stats += "✓ Нугалам хэвийн байна"
-    
-    plt.text(0.05, 0.5, stats, fontsize=10, family='monospace',
-             verticalalignment='center',
-             bbox=dict(boxstyle='round', facecolor='lightyellow', 
-                      edgecolor='black', linewidth=2, alpha=0.9))
+    # 2. Үр дүн
+    axes[1].imshow(cv2.cvtColor(result_img, cv2.COLOR_BGR2RGB))
+    title = f'L1-L5 нугалмын илрүүлэлт ({len(vertebrae)} олдсон)'
+    axes[1].set_title(title, fontsize=16, fontweight='bold', pad=20)
+    axes[1].axis('off')
     
     plt.tight_layout()
-    plt.show()
     
-    # Terminal дээр мэдээлэл
+    # Мэдээлэл хэвлэх
     print("\n" + "="*60)
-    if fractures:
-        print("⚠️  ХУГАРАЛ ИЛЭРЛЭЭ!")
-        print("="*60)
-        print(f"Нийт илэрсэн: {len(fractures)}")
-        for i, f in enumerate(fractures, 1):
-            print(f"\nХугарал #{i}:")
-            print(f"  Байршил: L1-L2 бүс")
-            print(f"  Талбай: {f['area']:.1f} пиксел²")
-            print(f"  Өргөн/Өндөр: {f['aspect_ratio']:.2f}")
-    else:
-        print("✓ ХУГАРАЛ ИЛРЭЭГҮЙ")
-        print("="*60)
-        print("Нугалам хэвийн байна.")
-    
-    print("\n📌 Тэмдэглэл:")
-    print("   - Энэ нь демо програм")
-    print("   - Эмнэлгийн оношлогоо биш")
-    print("   - Эмчид үзүүлэхийг зөвлөж байна")
+    print("ОЛДСОН НУГАЛМУУД:")
     print("="*60)
+    for vert in vertebrae:
+        x, y, w, h = vert['bbox']
+        print(f"{vert['label']:3s}: Байршил=({x:4d},{y:4d}), "
+              f"Хэмжээ={w:3d}×{h:3d}px, Талбай={vert['area']:8.0f}px²")
+    print("="*60)
+    
+    plt.show()
 
-if __name__ == "__main__":
-    main()
+# ==================== MAIN PROGRAM ====================
+
+print("\n" + "="*60)
+print("L1-L5 НУГАЛМЫН ИЛРҮҮЛЭЛТ")
+print("="*60 + "\n")
+
+# 1. DICOM зураг унших
+dicom_path = "img/example1.dcm"
+original_img = load_dicom_image(dicom_path)
+
+if original_img is not None:
+    # 2. Бага зэрэг сайжруулах (зөвхөн CLAHE)
+    print("[1/4] Зургийг бага зэрэг сайжруулж байна...")
+    enhanced = enhance_vertebrae(original_img)
+    
+    # 3. Нугалмын бүс олох
+    print("[2/4] Нугалмын бүс олж байна...")
+    contours, binary = detect_vertebrae_regions(enhanced)
+    print(f"      → {len(contours)} контур олдсон")
+    
+    # 4. L1-L5 шүүж таних
+    print("[3/4] L1-L5 таниж байна...")
+    vertebrae = filter_and_identify_vertebrae(contours, original_img.shape)
+    print(f"      → {len(vertebrae)} нугалам таньсан")
+    
+    if len(vertebrae) > 0:
+        # 5. Анхны зураг дээр дөрвөлжин зурах
+        print("[4/4] Үр дүн зурж байна...")
+        result_img = draw_vertebrae_boxes(original_img, vertebrae)
+        
+        # 6. Харуулах
+        create_result_display(original_img, result_img, vertebrae)
+        
+        print("\n✅ АМЖИЛТТАЙ ДУУСЛАА!\n")
+    else:
+        print("\n⚠️  Нугалам олдсонгүй. Параметрүүдийг тохируулах хэрэгтэй.")
+        
+        # Debug: бүх контурын мэдээлэл харуулах
+        print("\nБүх контурын мэдээлэл:")
+        for i, c in enumerate(contours[:10]):
+            area = cv2.contourArea(c)
+            x, y, w, h = cv2.boundingRect(c)
+            print(f"Контур {i+1}: area={area:.0f}, size={w}x{h}, pos=({x},{y})")
+        
+else:
+    print(f"\n❌ Зураг олдсонгүй: {dicom_path}\n")

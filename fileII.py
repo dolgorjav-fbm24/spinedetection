@@ -1,251 +1,249 @@
 import cv2
 import numpy as np
-import matplotlib.pyplot as plt
+import pydicom
+from matplotlib import pyplot as plt
 import os
 
-def load_image(path):
-    """Зураг уншина (DICOM эсвэл энгийн зураг)"""
+def load_dicom_image(dicom_path):
+    """DICOM файл уншиж numpy array болгох"""
     try:
-        # DICOM эсэхийг шалгах
-        if path.lower().endswith('.dcm'):
-            import pydicom as dicom
-            ds = dicom.dcmread(path)
-            img = ds.pixel_array
-            # Normalize to 8-bit
-             
-        else:
-            # Энгийн зураг (PNG, JPG)
-            img = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
-            
-        if img is None:
-            raise ValueError("Зураг уншигдсангүй")
-            
-        print(f"✅ Зураг уншигдлаа: {img.shape}")
-        return img
+        dicom = pydicom.dcmread(dicom_path)
+        img_array = dicom.pixel_array
         
-    except FileNotFoundError:
-        print(f"❌ Файл олдсонгүй: {path}")
-        print(f"💡 Одоогийн зам: {os.getcwd()}")
-        return None
+        # Normalize (0-255)
+        img_array = img_array.astype(float)
+        img_normalized = ((img_array - img_array.min()) / 
+                         (img_array.max() - img_array.min()) * 255)
+        img_normalized = img_normalized.astype(np.uint8)
+        
+        print(f"✓ Зураг уншсан: {img_normalized.shape}")
+        return img_normalized
     except Exception as e:
         print(f"❌ Алдаа: {e}")
         return None
 
-def preprocess_spine_image(img):
-    """Нурууны зургийг боловсруулна"""
-    # 1. Contrast enhancement (CLAHE)
+def preprocess_for_vertebrae(img):
+    """Нугалам олоход тохирсон preprocessing"""
+    # 1. CLAHE - яс сайн харагдуулах
     clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8,8))
     enhanced = clahe.apply(img)
     
-    # 2. Denoising
-    denoised = cv2.fastNlMeansDenoising(enhanced, None, h=10, 
-                                        templateWindowSize=7, 
-                                        searchWindowSize=21)
+    # 2. Gaussian blur
+    blurred = cv2.GaussianBlur(enhanced, (5, 5), 0)
     
-    # 3. Histogram equalization
-    equalized = cv2.equalizeHist(denoised)
+    # 3. Morphological operations - структур сайжруулах
+    kernel = np.ones((3,3), np.uint8)
+    morph = cv2.morphologyEx(blurred, cv2.MORPH_CLOSE, kernel)
     
-    return enhanced, denoised, equalized
+    return morph
 
-def detect_spine_region(img):
-    """Нурууны бүс олно"""
-    # Edge detection
-    edges = cv2.Canny(img, 50, 150)
+def detect_vertebrae(img):
+    """Нугалмыг олох"""
+    # Adaptive threshold - background-оос ялгах
+    binary = cv2.adaptiveThreshold(img, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
+                                   cv2.THRESH_BINARY_INV, 11, 2)
     
-    # Морфологи - edges-ийг холбох
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 15))
-    closed = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel)
+    # Morphological cleanup
+    kernel = np.ones((5,5), np.uint8)
+    binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
+    binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel)
     
-    # Contours олох
-    contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, 
-                                   cv2.CHAIN_APPROX_SIMPLE)
+    # Контурууд олох
+    contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     
-    # Хамгийн урт contour (нурууны мөр)
-    if contours:
-        spine_contour = max(contours, key=cv2.contourArea)
-        x, y, w, h = cv2.boundingRect(spine_contour)
-        return edges, closed, (x, y, w, h), spine_contour
-    
-    return edges, closed, None, None
+    return contours, binary
 
-def detect_vertebrae(img, spine_region):
-    """L1-L5 нугалмуудыг олно"""
-    if spine_region is None:
-        print("⚠️ Нурууны бүс олдсонгүй")
-        return [], img
+def filter_vertebrae_contours(contours, img_shape):
+    """Нугалам мэт харагдах контуруудыг шүүх"""
+    height, width = img_shape
+    candidates = []
     
-    x, y, w, h = spine_region
-    
-    # Нурууны бүсийг crop хийх
-    roi = img[y:y+h, x:x+w]
-    
-    # Adaptive threshold
-    binary = cv2.adaptiveThreshold(roi, 255, 
-                                   cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-                                   cv2.THRESH_BINARY_INV, 15, 3)
-    
-    # Морфологи - нугалмын хэлбэрийг сайжруулах
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-    morph = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel, iterations=2)
-    morph = cv2.morphologyEx(morph, cv2.MORPH_OPEN, kernel, iterations=1)
-    
-    # Contours олох
-    contours, _ = cv2.findContours(morph, cv2.RETR_EXTERNAL, 
-                                   cv2.CHAIN_APPROX_SIMPLE)
-    
-    # Нугалмуудыг шүүх
-    vertebrae = []
-    min_area = (w * h) * 0.01  # ROI-ийн 1%-иас их
-    max_area = (w * h) * 0.15  # ROI-ийн 15%-иас бага
-    
-    for cnt in contours:
-        area = cv2.contourArea(cnt)
-        if min_area < area < max_area:
-            # Bounding box
-            bx, by, bw, bh = cv2.boundingRect(cnt)
+    for contour in contours:
+        area = cv2.contourArea(contour)
+        x, y, w, h = cv2.boundingRect(contour)
+        
+        # Хэмжээний шалгуур
+        min_area = (height * width) * 0.005  # 0.5% -с их
+        max_area = (height * width) * 0.15   # 15% -с бага
+        
+        # Aspect ratio шалгуур (нугалам нь тэгш өнцөгт төстэй)
+        aspect_ratio = float(w) / h if h > 0 else 0
+        
+        # Шалгуурууд
+        if (min_area < area < max_area and 
+            0.4 < aspect_ratio < 2.5 and  # Өргөн ба өндрийн харьцаа
+            w > 20 and h > 20):  # Хэтэрхий жижиг биш
             
-            # Aspect ratio шалгах (нугалмын хэлбэр)
-            aspect_ratio = bw / float(bh) if bh > 0 else 0
-            
-            if 0.5 < aspect_ratio < 2.5:
-                # Глобал координат руу хөрвүүлэх
-                global_x = x + bx
-                global_y = y + by
-                vertebrae.append({
-                    'bbox': (global_x, global_y, bw, bh),
-                    'area': area,
-                    'contour': cnt,
-                    'center_y': global_y + bh//2
-                })
+            candidates.append({
+                'contour': contour,
+                'bbox': (x, y, w, h),
+                'area': area,
+                'center_y': y + h//2,
+                'center_x': x + w//2
+            })
     
-    # Y координатаар эрэмбэлэх (дээрээс доош: L1->L5)
-    vertebrae.sort(key=lambda v: v['center_y'])
-    
-    return vertebrae[:5], morph  # Зөвхөн эхний 5-ыг авах (L1-L5)
+    return candidates
 
-def visualize_results(original, enhanced, edges, spine_region, vertebrae, morph):
-    """Үр дүнг харуулна"""
-    # Үр дүн зураг үүсгэх
-    result = cv2.cvtColor(original, cv2.COLOR_GRAY2BGR)
+def identify_l1_l5(candidates, img_shape):
+    """L1-L5 нугалмыг таних (дээрээс доош эрэмбэлэх)"""
+    height = img_shape[0]
     
-    # Нурууны бүс зурах
-    if spine_region:
-        x, y, w, h = spine_region
-        cv2.rectangle(result, (x, y), (x+w, y+h), (255, 0, 0), 2)
+    # Y координатаар эрэмбэлэх (дээрээс доош)
+    candidates = sorted(candidates, key=lambda x: x['center_y'])
     
-    # Нугалмуудыг зурах
+    # Дунд хэсэгт байгаа нугалмуудыг сонгох (ихэвчлэн дунд хэсэгт байдаг)
+    middle_candidates = [c for c in candidates if 0.2*height < c['center_y'] < 0.8*height]
+    
+    # Хамгийн ойролцоо хэмжээтэй 5 нугалам сонгох
+    if len(middle_candidates) >= 5:
+        # Area-гаар ойролцоо байгаа 5-ыг авах
+        middle_candidates = sorted(middle_candidates, key=lambda x: x['area'], reverse=True)
+        vertebrae = middle_candidates[:5]
+        vertebrae = sorted(vertebrae, key=lambda x: x['center_y'])
+    else:
+        vertebrae = middle_candidates
+    
+    # L1-L5 гэж label хийх
     labels = ['L1', 'L2', 'L3', 'L4', 'L5']
-    colors = [(0, 255, 0), (0, 255, 255), (255, 255, 0), 
-              (255, 128, 0), (255, 0, 255)]
+    for i, vert in enumerate(vertebrae[:5]):
+        vert['label'] = labels[i] if i < len(labels) else f'L{i+1}'
     
-    for i, vert in enumerate(vertebrae):
-        bbox = vert['bbox']
-        x, y, w, h = bbox
-        
-        # Bounding box
-        color = colors[i] if i < len(colors) else (0, 255, 0)
-        cv2.rectangle(result, (x, y), (x+w, y+h), color, 2)
-        
-        # Label
-        label = labels[i] if i < len(labels) else f"V{i+1}"
-        cv2.putText(result, label, (x-30, y+h//2), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
-    
-    # Visualization
-    fig = plt.figure(figsize=(16, 10))
-    
-    # Layout
-    gs = fig.add_gridspec(2, 3, hspace=0.3, wspace=0.3)
-    
-    ax1 = fig.add_subplot(gs[0, 0])
-    ax1.imshow(original, cmap='gray')
-    ax1.set_title('1. Анхны зураг', fontsize=12, fontweight='bold')
-    ax1.axis('off')
-    
-    ax2 = fig.add_subplot(gs[0, 1])
-    ax2.imshow(enhanced, cmap='gray')
-    ax2.set_title('2. Enhanced (CLAHE)', fontsize=12, fontweight='bold')
-    ax2.axis('off')
-    
-    ax3 = fig.add_subplot(gs[0, 2])
-    ax3.imshow(edges, cmap='gray')
-    ax3.set_title('3. Edge Detection', fontsize=12, fontweight='bold')
-    ax3.axis('off')
-    
-    if morph is not None:
-        ax4 = fig.add_subplot(gs[1, 0])
-        ax4.imshow(morph, cmap='gray')
-        ax4.set_title('4. Morphology (ROI)', fontsize=12, fontweight='bold')
-        ax4.axis('off')
-    
-    ax5 = fig.add_subplot(gs[1, 1:])
-    ax5.imshow(cv2.cvtColor(result, cv2.COLOR_BGR2RGB))
-    ax5.set_title(f'5. Үр дүн: {len(vertebrae)} нугалам олдлоо', 
-                 fontsize=14, fontweight='bold', color='green')
-    ax5.axis('off')
-    
-    plt.suptitle('L1-L5 Нугалам Detection - OpenCV', 
-                fontsize=16, fontweight='bold', y=0.98)
-    
-    plt.show()
-    
-    # Статистик хэвлэх
-    print("\n" + "="*50)
-    print("📊 DETECTION ҮР ДҮН")
-    print("="*50)
-    for i, vert in enumerate(vertebrae):
-        label = labels[i] if i < len(labels) else f"V{i+1}"
-        bbox = vert['bbox']
-        area = vert['area']
-        print(f"{label}: bbox={bbox}, area={area:.0f} px²")
-    print("="*50)
+    return vertebrae
 
-def main():
-    """Main функц"""
-    print("🦴 L1-L5 НУГАЛАМ DETECTION - OpenCV")
-    print("="*50)
+def draw_vertebrae_boxes(img, vertebrae):
+    """Нугалам дээр дөрвөлжин болон label зурах"""
+    # RGB болгох
+    img_color = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
     
-    # Файлын зам (өөрчилж болно)
-    image_path = './img/example1.dcm'  # Танай файл
+    # Өнгөний палитр
+    colors = [
+        (255, 0, 0),    # Улаан - L1
+        (0, 255, 0),    # Ногоон - L2
+        (0, 0, 255),    # Цэнхэр - L3
+        (255, 255, 0),  # Шар - L4
+        (255, 0, 255)   # Ягаан - L5
+    ]
     
-    # 1. Зураг уншина
-    print("\n📂 Зураг уншиж байна...")
-    img = load_image(image_path)
+    for i, vert in enumerate(vertebrae):
+        x, y, w, h = vert['bbox']
+        color = colors[i % len(colors)]
+        label = vert['label']
+        
+        # Дөрвөлжин зурах (зузаан)
+        cv2.rectangle(img_color, (x, y), (x+w, y+h), color, 3)
+        
+        # Label зурах (том фонт)
+        font_scale = 1.5
+        thickness = 3
+        text_size = cv2.getTextSize(label, cv2.FONT_HERSHEY_BOLD, font_scale, thickness)[0]
+        
+        # Background rectangle
+        cv2.rectangle(img_color, (x-5, y-text_size[1]-10), 
+                     (x+text_size[0]+5, y), color, -1)
+        
+        # Text
+        cv2.putText(img_color, label, (x, y-5), 
+                   cv2.FONT_HERSHEY_BOLD, font_scale, (255, 255, 255), thickness)
+        
+        # Төв цэг зурах
+        center = (vert['center_x'], vert['center_y'])
+        cv2.circle(img_color, center, 5, color, -1)
     
-    if img is None:
-        print("\n💡 Зөвлөгөө:")
-        print("1. VinDr-SpineXR dataset татаж аваарай")
-        print("2. Зургийг './img/' folder дотор хадгалаарай")
-        print("3. Кодон дахь 'image_path' өөрчилнө үү")
-        return
+    return img_color
+
+def visualize_detection(original, preprocessed, binary, result_img, vertebrae):
+    """Үр дүнг харуулах"""
+    fig = plt.figure(figsize=(18, 12))
+    
+    # 1. Анхны зураг
+    plt.subplot(2, 3, 1)
+    plt.imshow(original, cmap='gray')
+    plt.title('1. Анхны DICOM зураг', fontsize=14, fontweight='bold')
+    plt.axis('off')
     
     # 2. Preprocessing
-    print("\n🔧 Зураг боловсруулж байна...")
-    enhanced, denoised, equalized = preprocess_spine_image(img)
+    plt.subplot(2, 3, 2)
+    plt.imshow(preprocessed, cmap='gray')
+    plt.title('2. Сайжруулсан зураг', fontsize=14, fontweight='bold')
+    plt.axis('off')
     
-    # 3. Нурууны бүс олох
-    print("\n🔍 Нурууны бүс хайж байна...")
-    edges, closed, spine_region, spine_contour = detect_spine_region(equalized)
+    # 3. Binary
+    plt.subplot(2, 3, 3)
+    plt.imshow(binary, cmap='gray')
+    plt.title('3. Binary threshold', fontsize=14, fontweight='bold')
+    plt.axis('off')
     
-    if spine_region:
-        x, y, w, h = spine_region
-        print(f"✅ Нурууны бүс олдлоо: ({x}, {y}, {w}, {h})")
+    # 4. Үр дүн (том)
+    plt.subplot(2, 2, 3)
+    plt.imshow(cv2.cvtColor(result_img, cv2.COLOR_BGR2RGB))
+    plt.title(f'4. L1-L5 нугалмын илрүүлэлт ({len(vertebrae)} олдсон)', 
+             fontsize=16, fontweight='bold')
+    plt.axis('off')
     
-    # 4. Нугалмуудыг олох
-    print("\n🦴 L1-L5 нугалмуудыг хайж байна...")
-    vertebrae, morph = detect_vertebrae(equalized, spine_region)
+    # 5. Мэдээлэл
+    ax = plt.subplot(2, 2, 4)
+    ax.axis('off')
     
-    print(f"✅ {len(vertebrae)} нугалам олдлоо!")
+    info_text = "НУГАЛМЫН МЭДЭЭЛЭЛ:\n" + "="*40 + "\n\n"
+    for i, vert in enumerate(vertebrae):
+        x, y, w, h = vert['bbox']
+        info_text += f"{vert['label']}:\n"
+        f"  • Байршил: ({x}, {y})\n"
+        info_text += f"  • Хэмжээ: {w}×{h} px\n"
+        info_text += f"  • Талбай: {vert['area']:.0f} px²\n\n"
     
-    # 5. Үр дүн харуулах
-    print("\n📊 Үр дүн харуулж байна...")
-    visualize_results(img, enhanced, edges, spine_region, vertebrae, morph)
+    ax.text(0.1, 0.9, info_text, fontsize=11, verticalalignment='top',
+           family='monospace', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
     
-    print("\n✅ Дууслаа!")
-    print("\n💡 Дараагийн алхам: YOLO model сургах")
+    plt.tight_layout()
+    plt.show()
 
-if __name__ == "__main__":
-    main()
-    # зөвхөн жишээ файл тул мөр бүрийг судлах.
+# ==================== MAIN PROGRAM ====================
 
+print("="*60)
+print("L1-L5 НУГАЛМЫН ИЛРҮҮЛЭЛТ")
+print("="*60)
+
+# 1. DICOM зураг унших
+dicom_path = "img/example1.dcm"
+img = load_dicom_image(dicom_path)
+
+if img is not None:
+    # 2. Preprocessing
+    print("\n[1/5] Зураг боловсруулж байна...")
+    preprocessed = preprocess_for_vertebrae(img)
+    
+    # 3. Нугалам олох
+    print("[2/5] Контурууд олж байна...")
+    contours, binary = detect_vertebrae(preprocessed)
+    print(f"      → {len(contours)} контур олдсон")
+    
+    # 4. Нугалам шүүх
+    print("[3/5] Нугалам шүүж байна...")
+    candidates = filter_vertebrae_contours(contours, img.shape)
+    print(f"      → {len(candidates)} candidates олдсон")
+    
+    # 5. L1-L5 таних
+    print("[4/5] L1-L5 таниж байна...")
+    vertebrae = identify_l1_l5(candidates, img.shape)
+    print(f"      → {len(vertebrae)} нугалам таньсан")
+    
+    # 6. Зурах
+    print("[5/5] Үр дүн зурж байна...")
+    result_img = draw_vertebrae_boxes(preprocessed, vertebrae)
+    
+    # 7. Харуулах
+    print("\n" + "="*60)
+    print("ОЛДСОН НУГАЛМУУД:")
+    print("="*60)
+    for vert in vertebrae:
+        x, y, w, h = vert['bbox']
+        print(f"{vert['label']}: Байршил=({x},{y}), Хэмжээ={w}×{h}px, Талбай={vert['area']:.0f}px²")
+    
+    visualize_detection(img, preprocessed, binary, result_img, vertebrae)
+    
+    print("\n✅ АМЖИЛТТАЙ ДУУСЛАА!")
+    
+else:
+    print(f"❌ Зураг олдсонгүй: {dicom_path}")
     
